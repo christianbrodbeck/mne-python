@@ -6,14 +6,14 @@
 
 from copy import deepcopy
 import fnmatch
-from glob import iglob
+from glob import glob
 import os
 import cPickle as pickle
 import re
 import shutil
 
 import logging
-from mne.utils import get_config, run_subprocess
+from mne.utils import get_config
 logger = logging.getLogger('mne')
 
 import numpy as np
@@ -26,12 +26,12 @@ from scipy.spatial.distance import cdist
 from ..fiff import Raw, FIFF
 from ..fiff.meas_info import read_fiducials, write_fiducials
 from ..label import read_label, Label
-from ..source_space import read_source_spaces, write_source_spaces, \
-                           setup_mri, watershed_bem
+from ..source_space import read_source_spaces, write_source_spaces
 from ..surface import read_surface, write_surface, read_bem_surfaces, \
                       write_bem_surface
 from ..utils import get_subjects_dir
-from .transforms import apply_trans, rotation, rotation3d, scaling, translation, write_trans
+from .transforms import apply_trans, rotation, rotation3d, scaling, \
+                        translation, write_trans
 
 
 
@@ -42,7 +42,7 @@ def create_default_subject(mne_root=None, fs_home=None, subjects_dir=None):
     """Create a default subject in subjects_dir
 
     Create a copy of fsaverage from the freesurfer directory in subjects_dir
-    and add auxiliary files provided by the mne package.
+    and add auxiliary files from the mne package.
 
     Parameters
     ----------
@@ -54,7 +54,7 @@ def create_default_subject(mne_root=None, fs_home=None, subjects_dir=None):
         specified as environment variable).
     subjects_dir : None | path
         Override the SUBJECTS_DIR environment variable
-        (sys.environ['SUBJECTS_DIR']) as destination for the new subject.
+        (os.environ['SUBJECTS_DIR']) as destination for the new subject.
     """
     subjects_dir = get_subjects_dir(subjects_dir, raise_error=True)
     if fs_home is None:
@@ -72,13 +72,6 @@ def create_default_subject(mne_root=None, fs_home=None, subjects_dir=None):
                    "create_default_subject().")
             raise ValueError(err)
 
-    # make sure destination does not already exist
-    dest = os.path.join(subjects_dir, 'fsaverage')
-    if os.path.exists(dest):
-        err = ("Can not create fsaverage because %r already exists in "
-               "subjects_dir %r" % ('fsaverage', subjects_dir))
-        raise IOError(err)
-
     # make sure freesurfer files exist
     fs_src = os.path.join(fs_home, 'subjects', 'fsaverage')
     if not os.path.exists(fs_src):
@@ -92,6 +85,21 @@ def create_default_subject(mne_root=None, fs_home=None, subjects_dir=None):
                    "named %s found in %s" % (name, fs_src))
             raise IOError(err)
 
+    # make sure destination does not already exist
+    dest = os.path.join(subjects_dir, 'fsaverage')
+    if dest == fs_src:
+        err = ("Your subjects_dir points to the freesurfer subjects_dir (%r). "
+               "The default subject can not be created in the freesurfer "
+               "installation directory; please specify a different "
+               "subjects_dir." % subjects_dir)
+        raise IOError(err)
+    elif os.path.exists(dest):
+        err = ("Can not create fsaverage because %r already exists in "
+               "subjects_dir %r. Delete or rename the existing fsaverage "
+               "subject folder." % ('fsaverage', subjects_dir))
+        raise IOError(err)
+
+
     # make sure mne files exist
     mne_fname = os.path.join(mne_root, 'share', 'mne', 'mne_analyze',
                              'fsaverage', 'fsaverage-%s.fif')
@@ -104,10 +112,12 @@ def create_default_subject(mne_root=None, fs_home=None, subjects_dir=None):
             raise IOError(err)
 
     # copy fsaverage from freesurfer
+    logger.info("Copying fsaverage subject from freesurfer directory...")
     shutil.copytree(fs_src, dest)
 
     # add files from mne
     dest_bem = os.path.join(dest, 'bem')
+    logger.info("Copying auxiliary fsaverage files from mne directory...")
     for name in mne_files:
         shutil.copy(mne_fname % name, dest_bem)
 
@@ -499,6 +509,71 @@ def is_mri_subject(subject, subjects_dir):
             return False
 
     return True
+
+
+def read_mri_scale(subject, subjects_dir=None):
+    """Read the scale factor for a scaled MRI brain
+
+    Parameters
+    ----------
+    subject : str
+        Name of the scaled MRI subject.
+    subjects_dir : None | str
+        Override the SUBJECTS_DIR environment variable.
+    """
+    subjects_dir = get_subjects_dir(subjects_dir, raise_error=True)
+    fname = os.path.join(subjects_dir, subject, 'MRI scaling parameters.txt')
+
+    with open(fname) as fid:
+        for line in fid:
+            if ':' in line:
+                param, value = line.split(':', 1)
+                if param.strip() == 'scale':
+                    # TODO: 3 factors
+                    return float(value)
+    raise IOError('Scaling parameter not found')
+
+
+def scale_labels(s_to, s_from='fsaverage', fname='aparc/*.label',
+                 subjects_dir=None):
+    """Scale labels to match a brain that was created by scaling fsaverage
+
+    Parameters
+    ----------
+    s_to : str
+        Name of the scaled MRI subject (the destination brain).
+    s_from : str
+        Name of the original MRI subject (the brain that was scaled to create
+        s_to, usually "fsaverage").
+    fname : str
+        Name of the label relative to the label directory in the MRI subject
+        directory (is expanded using glob, so it can contain "*"). For example,
+        "lh.BA3a.label" will scale "fsaverage/label/lh.BA3a.label".
+    subjects_dir : None | str
+        Override the SUBJECTS_DIR environment variable.
+    """
+    subjects_dir = get_subjects_dir(subjects_dir, raise_error=True)
+    scale = read_mri_scale(s_to, subjects_dir)
+
+    src_dir = os.path.join(subjects_dir, s_from, 'label')
+    dst_dir = os.path.join(subjects_dir, s_to, 'label')
+
+    os.chdir(src_dir)
+    fnames = glob(fname)
+
+    for fname in fnames:
+        src = os.path.join(src_dir, fname)
+        dst = os.path.join(dst_dir, fname)
+
+        dirname = os.path.dirname(dst)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+
+        l_old = read_label(src)
+        pos = l_old.pos * scale
+        l_new = Label(l_old.vertices, pos, l_old.values, l_old.hemi,
+                      l_old.comment)
+        l_new.save(dst)
 
 
 def scale_mri(s_from, s_to, scale, overwrite=False, subjects_dir=None):
