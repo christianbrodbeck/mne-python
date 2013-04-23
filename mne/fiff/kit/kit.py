@@ -24,7 +24,7 @@ from ...utils import verbose
 from ..raw import Raw
 from ..constants import FIFF
 from .constants import KIT, KIT_NY, KIT_AD
-from .coreg import get_dig_points, read_elp, read_hsp, read_mrk, read_sns, \
+from .coreg import get_dig_points, read_elp, read_hsp, read_mrk, \
                    get_neuromag_transform, transform_ALS_to_RAS
 
 logger = logging.getLogger('mne')
@@ -44,8 +44,6 @@ class RawKIT(Raw):
     hsp : str | array, shape = (n_pts, 3)
         Absolute path to elp digitizer head shape points file, or array with
         points.
-    sns_fname : str
-        Absolute path to sensor information file.
     stim : list of int | '<' | '>'
         Can be submitted as list of trigger channels.
         If a list is not specified, the default triggers extracted from
@@ -73,11 +71,8 @@ class RawKIT(Raw):
     """
     @verbose
     def __init__(self, input_fname, mrk=None, elp=None, hsp=None,
-                 sns_fname=None, stim='<', slope='+',
-                 stimthresh=1, verbose=None, preload=False):
-        if sns_fname is None:
-            err = ("An sns_fname must be provided, can't be None")
-            raise NotImplementedError(err)
+                 stim='>', slope='-', stimthresh=1,
+                 verbose=None, preload=False):
 
         logger.info('Extracting SQD Parameters from %s...' % input_fname)
         self._sqd_params = get_sqd_params(input_fname)
@@ -132,8 +127,8 @@ class RawKIT(Raw):
                                  in range(1, self._sqd_params['nmiscchan']
                                           + 1)]
         ch_names['STIM'] = ['STI 014']
-        locs = read_sns(sns_fname=sns_fname)
-        chan_locs = transform_ALS_to_RAS(locs[:, :3])
+        locs = self._sqd_params['sensor_locs']
+        chan_locs = transform_ALS_to_RAS(locs[:, :3], unit='m')
         chan_angles = locs[:, 3:]
         self.info['chs'] = []
         for idx, ch_info in enumerate(zip(ch_names['MEG'], chan_locs,
@@ -467,6 +462,34 @@ def get_sqd_params(rawfile):
         else:
             raise NotImplementedError
 
+        # channel locations
+        fid.seek(KIT_SYS.CHAN_LOC_OFFSET)
+        chan_offset = unpack('i', fid.read(KIT.INT))[0]
+        chan_size = unpack('i', fid.read(KIT.INT))[0]
+
+        fid.seek(chan_offset)
+        sensors = []
+        for i in xrange(KIT_SYS.n_sens):
+            fid.seek(chan_offset + chan_size * i)
+            sens_type = unpack('i', fid.read(KIT.INT))[0]
+            if sens_type == 1:
+                # magnetometer
+                # x,y,z,theta,phi,coilsize
+                sensors.append(np.fromfile(fid, dtype='d', count=6))
+            elif sens_type == 2:
+                # axialgradiometer
+                # x,y,z,theta,phi,baseline,coilsize
+                sensors.append(np.fromfile(fid, dtype='d', count=7))
+            elif sens_type == 3:
+                # planargradiometer
+                # x,y,z,theta,phi,btheta,bphi,baseline,coilsize
+                sensors.append(np.fromfile(fid, dtype='d', count=9))
+            elif sens_type == 257:
+                # reference channels
+                sensors.append(np.zeros(7))
+                sqd['i'] = sens_type
+        sqd['sensor_locs'] = np.array(sensors)
+
         # amplifier gain
         fid.seek(KIT_SYS.AMPLIFIER_INFO)
         amp_offset = unpack('i', fid.read(KIT_SYS.INT))[0]
@@ -522,8 +545,8 @@ def get_sqd_params(rawfile):
     return sqd
 
 
-def read_raw_kit(input_fname, mrk, elp, hsp, sns_fname,
-                 stim='<', slope='+', stimthresh=1,
+def read_raw_kit(input_fname, mrk, elp, hsp,
+                 stim='>', slope='-', stimthresh=1,
                  verbose=None, preload=False):
     """Reader function for KIT conversion to FIF
 
@@ -538,8 +561,6 @@ def read_raw_kit(input_fname, mrk, elp, hsp, sns_fname,
     hsp : str | array, shape = (n_pts, 3)
         Absolute path to elp digitizer head shape points file, or array with
         points.
-    sns_fname : str
-        Absolute path to sensor information file.
     stim : list of int | '<' | '>'
         Can be submitted as list of trigger channels.
         If a list is not specified, the default triggers extracted from
@@ -562,5 +583,5 @@ def read_raw_kit(input_fname, mrk, elp, hsp, sns_fname,
         If False, data are not read until save.
     """
     return RawKIT(input_fname=input_fname, mrk=mrk, elp=elp, hsp=hsp,
-                  sns_fname=sns_fname, stim=stim, slope=slope,
-                  stimthresh=stimthresh, verbose=verbose, preload=preload)
+                  stim=stim, slope=slope, stimthresh=stimthresh,
+                  verbose=verbose, preload=preload)
