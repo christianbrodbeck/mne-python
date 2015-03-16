@@ -227,5 +227,9 @@ def _interpolate_bads_eeg_epochs(epochs, bad_channels_by_epoch=None):
 
         # apply interpolation
         logger.info('Interpolating %i sensors on epoch %i', bads_idx.sum(), i)
-        epochs._data[i, bads_idx, :] = np.dot(interpolation,
-                                              epochs._data[i, goods_idx, :])
+        tmp = np.dot(interpolation[:, np.newaxis, :], epochs._data[i:i+1, goods_idx, :])
+        if np.sum(bads_idx) == 1:
+            tmp = tmp[0]
+        else:
+            tmp = tmp[:, 0, ...]
+        epochs._data[i:i+1, bads_idx, :] = np.transpose(tmp, (1, 0, 2))
