@@ -167,7 +167,7 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin,
     def __getstate__(self):
         f = PersistentBytesIO()
         write_evokeds(f, self)
-        return f.value
+        return f.get_value_after_close()
 
     def __setstate__(self, state):
         self.__init__(BytesIO(state))
