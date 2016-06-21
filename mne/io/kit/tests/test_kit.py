@@ -47,15 +47,15 @@ def test_data():
     # check functionality
     raw_mrk = read_raw_kit(sqd_path, [mrk2_path, mrk3_path], elp_txt_path,
                            hsp_txt_path)
-    raw_py = _test_raw_reader(read_raw_kit,
-                              input_fname=sqd_path, mrk=mrk_path, elp=elp_txt_path,
-                              hsp=hsp_txt_path, stim=list(range(167, 159, -1)),
-                              slope='+', stimthresh=1)
+    raw_py = _test_raw_reader(read_raw_kit, input_fname=sqd_path, mrk=mrk_path,
+                              elp=elp_txt_path, hsp=hsp_txt_path,
+                              stim=list(range(167, 159, -1)), slope='+',
+                              stimthresh=1)
     assert_true('RawKIT' in repr(raw_py))
 
     # Test stim channel
-    raw_stim = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path, stim='<',
-                            preload=False)
+    raw_stim = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path,
+                            stim='<', preload=False)
     for raw in [raw_py, raw_stim, raw_mrk]:
         stim_pick = pick_types(raw.info, meg=False, ref_meg=False,
                                stim=True, exclude='bads')
@@ -121,7 +121,8 @@ def test_raw_events():
 def test_ch_loc():
     """Test raw kit loc
     """
-    raw_py = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path, stim='<')
+    raw_py = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path,
+                          stim='<')
     raw_bin = Raw(op.join(data_dir, 'test_bin_raw.fif'))
 
     ch_py = raw_py._raw_extras[0]['sensor_locs'][:, :5]
