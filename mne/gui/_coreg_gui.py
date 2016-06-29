@@ -8,6 +8,7 @@ import os
 from ..externals.six.moves import queue
 import re
 from threading import Thread
+import traceback
 import warnings
 
 import numpy as np
@@ -37,8 +38,8 @@ except Exception:
         NoButtons = SceneEditor = trait_wraith
 
 
+from ..bem import make_bem_solution, write_bem_solution
 from ..coreg import bem_fname, trans_fname
-from ..forward import prepare_bem_model
 from ..transforms import (write_trans, read_trans, apply_trans, rotation,
                           translation, scaling, rotation_angles, Transform)
 from ..coreg import (fit_matched_points, fit_point_cloud, scale_mri,
@@ -476,49 +477,21 @@ class CoregModel(HasPrivateTraits):
 
         self.rot_x, self.rot_y, self.rot_z = est[:3]
 
-    def get_scaling_job(self, subject_to):
-        desc = 'Scaling %s' % subject_to
-        func = scale_mri
-        args = (self.mri.subject, subject_to, self.scale)
-        kwargs = dict(overwrite=True, subjects_dir=self.mri.subjects_dir)
-        return (desc, func, args, kwargs)
-
-    def get_prepare_bem_model_job(self, subject_to):
+    def get_scaling_job(self, subject_to, do_bem_sol):
+        "Find all arguments needed for the scaling worker"
         subjects_dir = self.mri.subjects_dir
         subject_from = self.mri.subject
-
-        bem_name = 'inner_skull-bem'
-        bem_file = bem_fname.format(subjects_dir=subjects_dir,
-                                    subject=subject_from, name=bem_name)
-        if not os.path.exists(bem_file):
+        bem_names = []
+        if do_bem_sol:
             pattern = bem_fname.format(subjects_dir=subjects_dir,
-                                       subject=subject_to, name='(.+-bem)')
-            bem_dir, bem_file = os.path.split(pattern)
-            m = None
-            bem_file_pattern = re.compile(bem_file)
-            for name in os.listdir(bem_dir):
-                m = bem_file_pattern.match(name)
-                if m is not None:
-                    break
+                                       subject=subject_from, name='(.+-bem)')
+            bem_dir, pattern = os.path.split(pattern)
+            for filename in os.listdir(bem_dir):
+                m = re.match(pattern, filename)
+                if m:
+                    bem_names.append(m.group(1))
 
-            if m is None:
-                pattern = bem_fname.format(subjects_dir=subjects_dir,
-                                           subject=subject_to, name='*-bem')
-                err = ("No bem file found; looking for files matching "
-                       "%s" % pattern)
-                error(None, err)
-
-            bem_name = m.group(1)
-
-        bem_file = bem_fname.format(subjects_dir=subjects_dir,
-                                    subject=subject_to, name=bem_name)
-
-        # job
-        desc = 'mne_prepare_bem_model for %s' % subject_to
-        func = prepare_bem_model
-        args = (bem_file,)
-        kwargs = {}
-        return (desc, func, args, kwargs)
+        return subjects_dir, subject_from, subject_to, self.scale, bem_names
 
     def load_trans(self, fname):
         """Load the head-mri transform from a fif file
@@ -655,7 +628,6 @@ class CoregPanel(HasPrivateTraits):
     queue_current = Str('')
     queue_len = Int(0)
     queue_len_str = Property(Str, depends_on=['queue_len'])
-    error = Str('')
 
     view = View(VGroup(Item('grow_hair', show_label=True),
                        Item('n_scale_params', label='MRI Scaling',
@@ -785,26 +757,48 @@ class CoregPanel(HasPrivateTraits):
     def __init__(self, *args, **kwargs):
         super(CoregPanel, self).__init__(*args, **kwargs)
 
-        # setup save worker
+        # Setup scaling worker
         def worker():
             while True:
-                desc, cmd, args, kwargs = self.queue.get()
-
+                subjects_dir, subject_from, subject_to, scale, bem_names = \
+                    self.queue.get()
                 self.queue_len -= 1
-                self.queue_current = 'Processing: %s' % desc
 
-                # task
+                # Scale MRI files
+                self.queue_current = 'Scaling %s...' % subject_to
                 try:
-                    cmd(*args, **kwargs)
-                except Exception as err:
-                    self.error = str(err)
-                    res = "Error in %s"
+                    scale_mri(subject_from, subject_to, scale, True,
+                              subjects_dir)
+                except:
+                    logger.error('Error scaling %s:\n' % subject_to +
+                                 traceback.format_exc())
+                    self.queue_feedback = ('Error scaling %s (see Terminal)' %
+                                           subject_to)
+                    bem_names = ()  # skip bem solutions
                 else:
-                    res = "Done: %s"
+                    self.queue_feedback = 'Done scaling %s.' % subject_to
 
-                # finalize
+                # Precompute BEM solutions
+                for bem_name in bem_names:
+                    self.queue_current = ('Computing %s solution...' %
+                                          bem_name)
+                    try:
+                        bem_file = bem_fname.format(subjects_dir=subjects_dir,
+                                                    subject=subject_to,
+                                                    name=bem_name)
+                        bemsol = make_bem_solution(bem_file)
+                        write_bem_solution(bem_file[:-4] + '-sol.fif', bemsol)
+                    except:
+                        logger.error('Error computing %s solution:\n' %
+                                     bem_name + traceback.format_exc())
+                        self.queue_feedback = ('Error computing %s solution '
+                                               '(see Terminal)' % bem_name)
+                    else:
+                        self.queue_feedback = ('Done computing %s solution.' %
+                                               bem_name)
+
+                # Finalize
                 self.queue_current = ''
-                self.queue_feedback = res % desc
                 self.queue.task_done()
 
         t = Thread(target=worker)
@@ -942,15 +936,9 @@ class CoregPanel(HasPrivateTraits):
                                   subject_from=subject_from,
                                   subject_to=subject_to)
             ui = mridlg.edit_traits(kind='modal')
-            if ui.result != True:  # noqa
+            if not ui.result:  # i.e., user pressed cancel
                 return
             subject_to = mridlg.subject_to
-
-        # find bem file to run mne_prepare_bem_model
-        if self.can_prepare_bem_model and self.prepare_bem_model:
-            bem_job = self.model.get_prepare_bem_model_job(subject_to)
-        else:
-            bem_job = None
 
         # find trans file destination
         raw_dir = os.path.dirname(self.model.hsp.file)
@@ -962,7 +950,7 @@ class CoregPanel(HasPrivateTraits):
             return
         trans_file = dlg.path
         if not trans_file.endswith('.fif'):
-            trans_file = trans_file + '.fif'
+            trans_file += '.fif'
             if os.path.exists(trans_file):
                 answer = confirm(None, "The file %r already exists. Should it "
                                  "be replaced?", "Overwrite File?")
@@ -973,18 +961,16 @@ class CoregPanel(HasPrivateTraits):
         try:
             self.model.save_trans(trans_file)
         except Exception as e:
-            error(None, str(e), "Error Saving Trans File")
-            return
+            error(None, "Error saving -trans.fif file: %s (See terminal for "
+                  "details)" % str(e), "Error Saving Trans File")
+            raise
 
         # save the scaled MRI
         if self.n_scale_params:
-            job = self.model.get_scaling_job(subject_to)
+            do_bem_sol = self.can_prepare_bem_model and self.prepare_bem_model
+            job = self.model.get_scaling_job(subject_to, do_bem_sol)
             self.queue.put(job)
             self.queue_len += 1
-
-            if bem_job is not None:
-                self.queue.put(bem_job)
-                self.queue_len += 1
 
     def _scale_x_dec_fired(self):
         self.scale_x -= self.scale_step
@@ -1073,7 +1059,10 @@ class NewMriDialog(HasPrivateTraits):
 
     @on_trait_change('subject_to_dir,overwrite')
     def update_dialog(self):
-        if not self.subject_to:
+        if not self.subject_from:
+            # weird trait state that occurs even when subject_from is set
+            return
+        elif not self.subject_to:
             self.feedback = "No subject specified..."
             self.can_save = False
             self.can_overwrite = False
@@ -1269,7 +1258,7 @@ class CoregFrame(HasTraits):
         color = defaults['mri_color']
         self.mri_obj = SurfaceObject(points=self.model.transformed_mri_points,
                                      color=color, tri=self.model.mri.tris,
-                                     scene=self.scene)
+                                     scene=self.scene, name="MRI Scalp")
         # on_trait_change was unreliable, so link it another way:
         self.model.mri.on_trait_change(self._on_mri_src_change, 'tris')
         self.model.sync_trait('transformed_mri_points', self.mri_obj, 'points',
@@ -1279,18 +1268,18 @@ class CoregFrame(HasTraits):
         # MRI Fiducials
         point_scale = defaults['mri_fid_scale']
         self.lpa_obj = PointObject(scene=self.scene, color=lpa_color,
-                                   point_scale=point_scale)
+                                   point_scale=point_scale, name='LPA')
         self.model.mri.sync_trait('lpa', self.lpa_obj, 'points', mutual=False)
         self.model.sync_trait('scale', self.lpa_obj, 'trans', mutual=False)
 
         self.nasion_obj = PointObject(scene=self.scene, color=nasion_color,
-                                      point_scale=point_scale)
+                                      point_scale=point_scale, name='Nasion')
         self.model.mri.sync_trait('nasion', self.nasion_obj, 'points',
                                   mutual=False)
         self.model.sync_trait('scale', self.nasion_obj, 'trans', mutual=False)
 
         self.rpa_obj = PointObject(scene=self.scene, color=rpa_color,
-                                   point_scale=point_scale)
+                                   point_scale=point_scale, name='RPA')
         self.model.mri.sync_trait('rpa', self.rpa_obj, 'points', mutual=False)
         self.model.sync_trait('scale', self.rpa_obj, 'trans', mutual=False)
 
@@ -1298,7 +1287,7 @@ class CoregFrame(HasTraits):
         color = defaults['hsp_point_color']
         point_scale = defaults['hsp_points_scale']
         p = PointObject(view='cloud', scene=self.scene, color=color,
-                        point_scale=point_scale, resolution=5)
+                        point_scale=point_scale, resolution=5, name='HSP')
         self.hsp_obj = p
         self.model.hsp.sync_trait('points', p, mutual=False)
         self.model.sync_trait('head_mri_trans', p, 'trans', mutual=False)
@@ -1308,21 +1297,21 @@ class CoregFrame(HasTraits):
         point_scale = defaults['hsp_fid_scale']
         opacity = defaults['hsp_fid_opacity']
         p = PointObject(scene=self.scene, color=lpa_color, opacity=opacity,
-                        point_scale=point_scale)
+                        point_scale=point_scale, name='HSP-LPA')
         self.hsp_lpa_obj = p
         self.model.hsp.sync_trait('lpa', p, 'points', mutual=False)
         self.model.sync_trait('head_mri_trans', p, 'trans', mutual=False)
         self.sync_trait('hsp_visible', p, 'visible', mutual=False)
 
         p = PointObject(scene=self.scene, color=nasion_color, opacity=opacity,
-                        point_scale=point_scale)
+                        point_scale=point_scale, name='HSP-Nasion')
         self.hsp_nasion_obj = p
         self.model.hsp.sync_trait('nasion', p, 'points', mutual=False)
         self.model.sync_trait('head_mri_trans', p, 'trans', mutual=False)
         self.sync_trait('hsp_visible', p, 'visible', mutual=False)
 
         p = PointObject(scene=self.scene, color=rpa_color, opacity=opacity,
-                        point_scale=point_scale)
+                        point_scale=point_scale, name='HSP-RPA')
         self.hsp_rpa_obj = p
         self.model.hsp.sync_trait('rpa', p, 'points', mutual=False)
         self.model.sync_trait('head_mri_trans', p, 'trans', mutual=False)

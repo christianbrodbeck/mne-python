@@ -3,6 +3,7 @@
 # License: BSD (3-clause)
 
 import os
+import re
 
 import numpy as np
 from numpy.testing import assert_allclose
@@ -101,7 +102,22 @@ def test_coreg_model():
     assert_true(isinstance(model.fid_eval_str, string_types))
     assert_true(isinstance(model.points_eval_str, string_types))
 
-    model.get_prepare_bem_model_job('sample')
+    # scaling job
+    sdir, sfrom, sto, scale, bemsol = model.get_scaling_job('sample2', True)
+    assert_equal(sdir, subjects_dir)
+    assert_equal(sfrom, 'sample')
+    assert_equal(sto, 'sample2')
+    assert_equal(scale, model.scale)
+    # find BEM files
+    bems = set()
+    for fname in os.listdir(os.path.join(subjects_dir, 'sample', 'bem')):
+        m = re.match('sample-(.+-bem)\.fif', fname)
+        if m:
+            bems.add(m.group(1))
+    assert_equal(set(bemsol), bems)
+    sdir, sfrom, sto, scale, bemsol = model.get_scaling_job('sample2', False)
+    assert_equal(bemsol, [])
+
     model.load_trans(fname_trans)
 
     from mne.gui._coreg_gui import CoregFrame
@@ -165,12 +181,15 @@ def test_coreg_model_with_fsaverage():
     avg_point_distance_1param = np.mean(model.point_distance)
     assert_true(avg_point_distance_1param < avg_point_distance)
 
-    desc, func, args, kwargs = model.get_scaling_job('test')
-    assert_true(isinstance(desc, string_types))
-    assert_equal(args[0], 'fsaverage')
-    assert_equal(args[1], 'test')
-    assert_allclose(args[2], model.scale)
-    assert_equal(kwargs['subjects_dir'], tempdir)
+    # scaling job
+    sdir, sfrom, sto, scale, bemsol = model.get_scaling_job('scaled', True)
+    assert_equal(sdir, tempdir)
+    assert_equal(sfrom, 'fsaverage')
+    assert_equal(sto, 'scaled')
+    assert_equal(scale, model.scale)
+    assert_equal(set(bemsol), set(('inner_skull-bem',)))
+    sdir, sfrom, sto, scale, bemsol = model.get_scaling_job('scaled', False)
+    assert_equal(bemsol, [])
 
     # scale with 3 parameters
     model.n_scale_params = 3
