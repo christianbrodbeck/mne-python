@@ -28,8 +28,10 @@ events_path = op.join(data_dir, 'test-eve.txt')
 mrk_path = op.join(data_dir, 'test_mrk.sqd')
 mrk2_path = op.join(data_dir, 'test_mrk_pre.sqd')
 mrk3_path = op.join(data_dir, 'test_mrk_post.sqd')
-elp_path = op.join(data_dir, 'test_elp.txt')
-hsp_path = op.join(data_dir, 'test_hsp.txt')
+elp_txt_path = op.join(data_dir, 'test_elp.txt')
+hsp_txt_path = op.join(data_dir, 'test_hsp.txt')
+elp_path = op.join(data_dir, 'test.elp')
+hsp_path = op.join(data_dir, 'test.hsp')
 
 
 def test_data():
@@ -37,23 +39,23 @@ def test_data():
     """
     assert_raises(TypeError, read_raw_kit, epochs_path)
     assert_raises(TypeError, read_epochs_kit, sqd_path)
-    assert_raises(ValueError, read_raw_kit, sqd_path, mrk_path, elp_path)
+    assert_raises(ValueError, read_raw_kit, sqd_path, mrk_path, elp_txt_path)
     assert_raises(ValueError, read_raw_kit, sqd_path, None, None, None,
                   list(range(200, 190, -1)))
     assert_raises(ValueError, read_raw_kit, sqd_path, None, None, None,
                   list(range(167, 159, -1)), '*', 1, True)
     # check functionality
-    raw_mrk = read_raw_kit(sqd_path, [mrk2_path, mrk3_path], elp_path,
-                           hsp_path)
-    raw_py = _test_raw_reader(read_raw_kit,
-                              input_fname=sqd_path, mrk=mrk_path, elp=elp_path,
-                              hsp=hsp_path, stim=list(range(167, 159, -1)),
-                              slope='+', stimthresh=1)
+    raw_mrk = read_raw_kit(sqd_path, [mrk2_path, mrk3_path], elp_txt_path,
+                           hsp_txt_path)
+    raw_py = _test_raw_reader(read_raw_kit, input_fname=sqd_path, mrk=mrk_path,
+                              elp=elp_txt_path, hsp=hsp_txt_path,
+                              stim=list(range(167, 159, -1)), slope='+',
+                              stimthresh=1)
     assert_true('RawKIT' in repr(raw_py))
 
     # Test stim channel
-    raw_stim = read_raw_kit(sqd_path, mrk_path, elp_path, hsp_path, stim='<',
-                            preload=False)
+    raw_stim = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path,
+                            stim='<', preload=False)
     for raw in [raw_py, raw_stim, raw_mrk]:
         stim_pick = pick_types(raw.info, meg=False, ref_meg=False,
                                stim=True, exclude='bads')
@@ -119,7 +121,8 @@ def test_raw_events():
 def test_ch_loc():
     """Test raw kit loc
     """
-    raw_py = read_raw_kit(sqd_path, mrk_path, elp_path, hsp_path, stim='<')
+    raw_py = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path,
+                          stim='<')
     raw_bin = Raw(op.join(data_dir, 'test_bin_raw.fif'))
 
     ch_py = raw_py._raw_extras[0]['sensor_locs'][:, :5]
@@ -137,10 +140,34 @@ def test_ch_loc():
 
     # test when more than one marker file provided
     mrks = [mrk_path, mrk2_path, mrk3_path]
-    read_raw_kit(sqd_path, mrks, elp_path, hsp_path, preload=False)
+    read_raw_kit(sqd_path, mrks, elp_txt_path, hsp_txt_path, preload=False)
     # this dataset does not have the equivalent set of points :(
     raw_bin.info['dig'] = raw_bin.info['dig'][:8]
     raw_py.info['dig'] = raw_py.info['dig'][:8]
     assert_dig_allclose(raw_py.info, raw_bin.info)
+
+
+def test_hsp_elp():
+    """Test KIT usage of *.elp and *.hsp files against *.txt files
+    """
+    raw = read_raw_kit(sqd_path, mrk_path, elp_txt_path, hsp_txt_path)
+    raw_leg = read_raw_kit(sqd_path, mrk_path, elp_path, hsp_path)
+
+    trans = raw.info['dev_head_t']['trans']
+    trans_leg = raw_leg.info['dev_head_t']['trans']
+    assert_array_almost_equal(trans, trans_leg, decimal=5)
+
+    raw_pts = np.array([point['r'] for point in raw.info['dig']])
+    raw_leg_pts = np.array([point['r'] for point in raw_leg.info['dig']])
+
+    # test elp
+    err = 'There is a problem with elp points for txt and legacy.'
+    assert_array_almost_equal(raw_pts[:8], raw_leg_pts[:8], decimal=5,
+                              err_msg=err)
+
+    # test hsp
+    err = 'There is a problem with hsp points for txt and legacy.'
+    assert_array_almost_equal(raw_pts[8:], raw_leg_pts[8:], decimal=5,
+                              err_msg=err)
 
 run_tests_if_main()
