@@ -649,6 +649,18 @@ def test_getitem():
         assert_raises(ValueError, raw.__getitem__,
                       (slice(-len(raw.ch_names) - 1), slice(None)))
 
+    # first_samp = 12900, last_samp = 18906, n_samples = 6006
+    raw = Raw(fif_fname, preload=False)
+    raw_preload = raw.copy().load_data()
+
+    # retrieve data from a raw with first_samp != 0
+    data, times = raw[:, 5900:5900 + 10]
+    assert_equal(data.shape, (376, 10))
+    assert_equal(times.shape, (10,))
+    pdata, ptimes = raw_preload[:, 5900:5900 + 10]
+    assert_equal(pdata, data)
+    assert_equal(ptimes, times)
+
 
 @testing.requires_testing_data
 def test_proj():
