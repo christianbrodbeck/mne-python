@@ -394,8 +394,12 @@ class Kit2FiffModel(HasPrivateTraits):
         stim_ch = _make_stim_channel(data, self.stim_slope,
                                      self.stim_threshold, coding,
                                      self.stim_chs_array)
+        # If trigger-channels are read as binary numbers, small onset
+        # differences between channels can be misinterpreted as different
+        # events; This is not an issue when coding one event per channel
+        min_samples = 0 if self.stim_coding == 'channel' else 3
         events = _find_events(stim_ch, self.raw.first_samp, consecutive=True,
-                              min_samples=3)
+                              min_samples=min_samples)
         return Counter(events[:, 2])
 
     def get_raw(self, preload=False):
@@ -665,13 +669,21 @@ class Kit2FiffPanel(HasPrivateTraits):
             raise
 
         if len(events) == 0:
-            information(None, "No events were found with the current "
-                        "settings.", "No Events Found")
+            title = "No Events Found"
+            lines = ["No events were found with the current settings."]
         else:
+            title = "Events in SQD File"
             lines = ["Events found (ID: n events):"]
             for id_ in sorted(events):
                 lines.append("%3i: \t%i" % (id_, events[id_]))
-            information(None, '\n'.join(lines), "Events in SQD File")
+            if self.stim_coding == 'channel':
+                lines.append(
+                    "Note: For simultaneous events, channel # are added.")
+
+        if self.stim_coding != 'channel':
+            lines.append(
+                "Note: Only events with at least 3 samples duration are shown")
+        information(None, '\n'.join(lines), title)
 
 
 class Kit2FiffFrame(HasTraits):
